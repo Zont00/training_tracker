@@ -25,16 +25,15 @@ dp = Dispatcher()
 workout_plan: list[dict] = []
 
 # Sessioni utente
-# user_sessions[user_id] = {"allenamento": "PUSH", "plan": [...], "idx": 0}
 user_sessions: dict[int, dict] = {}
 
-# Log delle serie utente
-# user_logs[user_id][allenamento][esercizio] = [{"peso": X, "ripetizioni": Y}, ...]
+# Log delle serie utente con storico
+# user_logs[user_id][allenamento] = [{"date": ..., "logs": {exercise: [serie...]}}]
 user_logs: dict[int, dict] = {}
 
 
 # =========================
-# /start e /help
+# /start
 # =========================
 @dp.message(Command("start"))
 async def start(message: Message):
@@ -46,17 +45,13 @@ async def start(message: Message):
         "❌ /cancel – Annulla la sessione\n"
     )
 
-@dp.message(Command("help"))
-async def help_cmd(message: Message):
-    await start(message)
-
 
 # =========================
-# Import del piano (.xlsx)
+# Import Excel
 # =========================
 @dp.message(Command("import_plan"))
 async def import_plan(message: Message):
-    await message.answer("📂 Inviami un file **Excel (.xlsx)** con le colonne: Allenamento, Esercizio, Serie, Ripetizioni, Recupero.")
+    await message.answer("📂 Inviami un file **Excel (.xlsx)** con: Allenamento, Esercizio, Serie, Ripetizioni, Recupero.")
 
 @dp.message(F.document)
 async def handle_excel(message: Message):
@@ -67,34 +62,29 @@ async def handle_excel(message: Message):
         file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
 
         df = pd.read_excel(file_url)
-
         expected = {"Allenamento", "Esercizio", "Serie", "Ripetizioni", "Recupero"}
         if not expected.issubset(set(df.columns)):
-            return await message.answer("⚠️ Il file deve contenere le colonne: Allenamento, Esercizio, Serie, Ripetizioni, Recupero.")
+            return await message.answer("⚠️ Il file deve avere: Allenamento, Esercizio, Serie, Ripetizioni, Recupero.")
 
         df["Allenamento"] = df["Allenamento"].astype(str).str.strip()
         df["Esercizio"] = df["Esercizio"].astype(str).str.strip()
         workout_plan = df.to_dict(orient="records")
 
         blocchi = sorted(set(r["Allenamento"] for r in workout_plan))
-        await message.answer(
-            f"✅ Piano importato! Esercizi: {len(workout_plan)}\n"
-            f"Blocchi: {', '.join(blocchi)}\n\n"
-            "Usa /show_plan per vedere la scheda o /workout_plan per iniziare."
-        )
+        await message.answer(f"✅ Piano importato! Blocchi: {', '.join(blocchi)}\nUsa /show_plan o /workout_plan.")
     except Exception as e:
-        await message.answer(f"❌ Errore durante l'import: {e}")
+        await message.answer(f"❌ Errore durante import: {e}")
 
 
 # =========================
-# Visualizza piano formattato
+# Mostra piano
 # =========================
 @dp.message(Command("show_plan"))
 async def show_plan(message: Message):
     if not workout_plan:
-        return await message.answer("⚠️ Nessun piano importato. Usa prima /import_plan 📂")
+        return await message.answer("⚠️ Nessun piano importato.")
 
-    text = "📋 **Il tuo piano di allenamento:**\n\n"
+    text = "📋 **Piano di allenamento:**\n\n"
     plan_sorted = sorted(workout_plan, key=lambda x: x["Allenamento"])
     for allenamento, esercizi in groupby(plan_sorted, key=lambda x: x["Allenamento"]):
         text += f"🏷️ **{allenamento}**\n"
@@ -102,7 +92,6 @@ async def show_plan(message: Message):
             rec_txt = str(ex.get("Recupero", "")).strip()
             text += f"   🔹 {ex['Esercizio']} — {ex['Serie']}×{ex['Ripetizioni']} (rec {rec_txt})\n"
         text += "\n"
-
     await message.answer(text, parse_mode="Markdown")
 
 
@@ -112,25 +101,22 @@ async def show_plan(message: Message):
 @dp.message(Command("workout_plan"))
 async def workout_plan_entry(message: Message):
     if not workout_plan:
-        return await message.answer("⚠️ Nessun piano importato. Usa prima /import_plan 📂")
+        return await message.answer("⚠️ Nessun piano importato.")
 
     blocchi = sorted(set(r["Allenamento"] for r in workout_plan))
     kb = InlineKeyboardBuilder()
     for b in blocchi:
         kb.button(text=b, callback_data=f"choose_day:{b}")
     kb.adjust(2)
-
-    await message.answer("Scegli l'allenamento che vuoi eseguire oggi:", reply_markup=kb.as_markup())
+    await message.answer("Scegli l'allenamento di oggi:", reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data.startswith("choose_day:"))
 async def choose_day(callback: CallbackQuery):
     day = callback.data.split(":", 1)[1]
-    subplan = [r for r in workout_plan if str(r.get("Allenamento", "")) == day]
+    subplan = [r for r in workout_plan if r["Allenamento"] == day]
 
     user_sessions[callback.from_user.id] = {"allenamento": day, "plan": subplan, "idx": 0}
-    user_logs.setdefault(callback.from_user.id, {}).setdefault(day, {})
-
     await callback.answer()
     await send_exercise(callback.from_user.id, callback)
 
@@ -142,7 +128,6 @@ async def send_exercise(user_id: int, message_or_callback: Message | CallbackQue
 
     idx = session["idx"]
     plan = session["plan"]
-
     if idx >= len(plan):
         return await end_workout(user_id, message_or_callback)
 
@@ -170,7 +155,7 @@ async def send_exercise(user_id: int, message_or_callback: Message | CallbackQue
 
 
 # =========================
-# Navigazione esercizi
+# Navigazione
 # =========================
 @dp.callback_query(F.data == "nav:next")
 async def nav_next(callback: CallbackQuery):
@@ -188,7 +173,7 @@ async def nav_end(callback: CallbackQuery):
 
 
 # =========================
-# Logging delle serie
+# Logging serie
 # =========================
 @dp.callback_query(F.data == "nav:log")
 async def log_series(callback: CallbackQuery):
@@ -198,11 +183,9 @@ async def log_series(callback: CallbackQuery):
     idx = session["idx"]
     exercise = session["plan"][idx]["Esercizio"]
 
-    await callback.message.answer(f"➕ Inserisci i dati per **{exercise}**\nFormato: `peso ripetizioni`\n(Esempio: `50 10`)", parse_mode="Markdown")
-    await callback.answer()
-
-    # Salviamo che l'utente deve loggare
+    await callback.message.answer(f"➕ Inserisci i dati per **{exercise}**\nFormato: `peso ripetizioni`\nEsempio: `50 10`", parse_mode="Markdown")
     session["awaiting_log"] = True
+    await callback.answer()
 
 
 @dp.message()
@@ -213,21 +196,23 @@ async def capture_log(message: Message):
 
     try:
         peso, reps = message.text.strip().split()
-        log_entry = {"peso": peso, "ripetizioni": reps}
-        allenamento = session["allenamento"]
+        log_entry = {"peso": int(peso), "ripetizioni": int(reps)}
         idx = session["idx"]
         exercise = session["plan"][idx]["Esercizio"]
+        allenamento = session["allenamento"]
 
-        user_logs[message.from_user.id][allenamento].setdefault(exercise, []).append(log_entry)
+        # Salva log corrente nella sessione
+        logs = session.setdefault("logs", {})
+        logs.setdefault(exercise, []).append(log_entry)
+
         session["awaiting_log"] = False
-
         await message.answer(f"✅ Serie registrata: {peso}kg x {reps} reps per {exercise}")
     except Exception:
         await message.answer("⚠️ Formato non valido. Usa ad esempio: `50 10`")
 
 
 # =========================
-# Fine allenamento
+# Fine allenamento con confronto
 # =========================
 async def end_workout(user_id: int, message_or_callback: Message | CallbackQuery):
     session = user_sessions.pop(user_id, None)
@@ -235,17 +220,44 @@ async def end_workout(user_id: int, message_or_callback: Message | CallbackQuery
         return
 
     allenamento = session["allenamento"]
-    logs = user_logs.get(user_id, {}).get(allenamento, {})
+    logs = session.get("logs", {})
 
+    # Recupera storico passato
+    storico = user_logs.setdefault(user_id, {}).setdefault(allenamento, [])
+    confronto_txt = ""
+    if storico:
+        confronto_txt = "\n📈 Confronto con la scorsa volta:\n"
+        last_logs = storico[-1]["logs"]
+        for ex, serie_correnti in logs.items():
+            if ex in last_logs:
+                confronto_txt += f"\n🔹 {ex}\n"
+                for i, s in enumerate(serie_correnti):
+                    if i < len(last_logs[ex]):
+                        prev = last_logs[ex][i]
+                        trend = "➡️"
+                        if s["peso"] > prev["peso"] or s["ripetizioni"] > prev["ripetizioni"]:
+                            trend = "🔼"
+                        elif s["peso"] < prev["peso"] or s["ripetizioni"] < prev["ripetizioni"]:
+                            trend = "🔽"
+                        confronto_txt += f"   {s['peso']}kg x {s['ripetizioni']} reps ({trend} vs {prev['peso']}kg x {prev['ripetizioni']})\n"
+                    else:
+                        confronto_txt += f"   {s['peso']}kg x {s['ripetizioni']} reps (nuova serie)\n"
+
+    # Salva la sessione nello storico
+    storico.append({"logs": logs})
+
+    # Report finale
     text = f"🎉 Allenamento **{allenamento}** terminato!\n\n"
     if logs:
-        text += "📊 Ecco le tue serie registrate:\n"
+        text += "📊 Serie registrate:\n"
         for ex, series in logs.items():
             text += f"\n🔹 {ex}\n"
             for s in series:
                 text += f"   - {s['peso']}kg x {s['ripetizioni']} reps\n"
     else:
         text += "Nessuna serie registrata."
+
+    text += confronto_txt
 
     if isinstance(message_or_callback, CallbackQuery):
         await message_or_callback.message.edit_text(text, parse_mode="Markdown")
@@ -260,7 +272,7 @@ async def end_workout(user_id: int, message_or_callback: Message | CallbackQuery
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: Message):
     user_sessions.pop(message.from_user.id, None)
-    await message.answer("❌ Sessione annullata. Puoi riavviare con /workout_plan.")
+    await message.answer("❌ Sessione annullata.")
 
 
 # =========================
