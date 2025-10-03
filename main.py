@@ -1,83 +1,98 @@
-import asyncio
 import logging
+import pandas as pd
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import Command
+import asyncio
 import os
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.context import FSMContext
-
-# Logging base
+# --- Logging ---
 logging.basicConfig(level=logging.INFO)
 
-# Carica token da env
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN non trovato nelle variabili d'ambiente!")
-
-bot = Bot(token=BOT_TOKEN)
+# --- Variabili globali ---
+TOKEN = os.getenv("BOT_TOKEN")  # Ricorda di settare BOT_TOKEN su Railway
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ==============================
-# 📋 MENU PRINCIPALE
-# ==============================
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📋 Piano Allenamento")],
-        [KeyboardButton(text="🏋️ Inizia Allenamento")],
-        [KeyboardButton(text="📊 Progressi")],
-        [KeyboardButton(text="🔄 Reset")],
-    ],
-    resize_keyboard=True
-)
+workout_plan = []  # qui verrà salvato il piano importato
 
-# ==============================
-# 🚀 HANDLERS
-# ==============================
 
+# --- Start ---
 @dp.message(Command("start"))
-async def start(message: Message, state: FSMContext):
-    await state.clear()
+async def start(message: Message):
     await message.answer(
-        "Benvenuto nel Gym Bot 💪\n"
-        "Qui puoi gestire i tuoi allenamenti e tracciare i progressi.\n\n"
-        "👉 Usa i pulsanti qui sotto per iniziare:",
-        reply_markup=main_menu
+        "💪 Benvenuto nel tuo Workout Bot!\n\n"
+        "Comandi disponibili:\n"
+        "📂 /import_plan - Importa un file Excel con il piano\n"
+        "📋 /show_plan - Mostra il piano importato\n"
+        "🏋️ /workout_plan - Avvia la sessione guidata\n"
     )
 
-@dp.message(Command("help"))
-async def help_command(message: Message):
-    await message.answer(
-        "ℹ️ **Comandi disponibili**:\n\n"
-        "📋 Piano Allenamento – mostra o carica il piano\n"
-        "🏋️ Inizia Allenamento – avvia una sessione guidata\n"
-        "📊 Progressi – visualizza i tuoi progressi\n"
-        "🔄 Reset – resetta i dati e torna al menu\n\n"
-        "Puoi sempre usare il menu in basso 👇",
-        reply_markup=main_menu
-    )
 
-# Handler per i pulsanti
-@dp.message(F.text == "📋 Piano Allenamento")
+# --- Import del piano ---
+@dp.message(Command("import_plan"))
+async def import_plan(message: Message):
+    await message.answer("📂 Inviami un file Excel con il piano di allenamento.")
+
+
+# --- Ricezione file Excel ---
+@dp.message(F.document)
+async def handle_file(message: Message):
+    global workout_plan
+    file = await bot.get_file(message.document.file_id)
+    file_path = file.file_path
+    file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+
+    try:
+        df = pd.read_excel(file_url)
+        workout_plan = df.to_dict(orient="records")
+        await message.answer("✅ Piano importato con successo! Usa /show_plan per visualizzarlo.")
+    except Exception as e:
+        await message.answer(f"❌ Errore nell'importazione del file: {e}")
+
+
+# --- Mostra piano formattato ---
+@dp.message(Command("show_plan"))
 async def show_plan(message: Message):
-    await message.answer("📋 Ecco il tuo piano di allenamento!\n\n(Work in progress: qui possiamo integrare la lettura del piano da file o database)")
+    global workout_plan
 
-@dp.message(F.text == "🏋️ Inizia Allenamento")
-async def start_workout(message: Message):
-    await message.answer("🏋️ Perfetto! Iniziamo l'allenamento.\n\n(Work in progress: qui partirà la sessione con gli esercizi e il tracking delle serie).")
+    if not workout_plan:
+        await message.answer("⚠️ Nessun piano importato. Usa prima /import_plan 📂")
+        return
 
-@dp.message(F.text == "📊 Progressi")
-async def show_progress(message: Message):
-    await message.answer("📊 Qui vedrai i tuoi progressi.\n\n(Work in progress: possiamo mostrare grafici o log degli allenamenti).")
+    text = "📋 **Il tuo piano di allenamento:**\n\n"
 
-@dp.message(F.text == "🔄 Reset")
-async def reset(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("⚠️ Tutti i dati sono stati resettati.\nTornando al menu principale.", reply_markup=main_menu)
+    # Raggruppiamo per Allenamento
+    from itertools import groupby
+    workout_plan_sorted = sorted(workout_plan, key=lambda x: x["Allenamento"])
+    for allenamento, esercizi in groupby(workout_plan_sorted, key=lambda x: x["Allenamento"]):
+        text += f"🏋️ Allenamento **{allenamento}**\n"
+        for ex in esercizi:
+            text += f"   🔹 {ex['Esercizio']} — {ex['Serie']}x{ex['Ripetizioni']} (Recupero: {ex['Recupero']} sec)\n"
+        text += "\n"
 
-# ==============================
-# 🚀 AVVIO BOT
-# ==============================
+    await message.answer(text, parse_mode="Markdown")
+
+
+# --- Workout guidato ---
+@dp.message(Command("workout_plan"))
+async def workout_plan_session(message: Message):
+    global workout_plan
+    if not workout_plan:
+        await message.answer("⚠️ Nessun piano importato. Usa prima /import_plan 📂")
+        return
+
+    await message.answer("🚀 Avvio sessione allenamento...\n")
+    for exercise in workout_plan:
+        text = (
+            f"🏋️ Esercizio: *{exercise['Esercizio']}*\n"
+            f"📊 Serie: {exercise['Serie']} | Ripetizioni: {exercise['Ripetizioni']}\n"
+            f"⏱ Recupero: {exercise['Recupero']} sec"
+        )
+        await message.answer(text, parse_mode="Markdown")
+
+
+# --- Main ---
 async def main():
     await dp.start_polling(bot)
 
