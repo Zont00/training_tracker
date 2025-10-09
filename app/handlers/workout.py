@@ -96,6 +96,19 @@ async def back_set_callback(cb: types.CallbackQuery):
         await cb.answer("🏁 Allenamento concluso.")
         return
 
+    # Se siamo alla prima serie di un esercizio e non siamo al primo esercizio, torna all'esercizio precedente
+    if user.set_idx == 0 and user.exercise_idx > 0:
+        user.exercise_idx -= 1
+        ex_prev = exercises[user.exercise_idx]
+        total_sets_prev = int(ex_prev["sets"])
+        user.set_idx = total_sets_prev - 1  # ultima serie dell'esercizio precedente
+        db.commit()
+        db.close()
+        await cb.message.answer(f"↩️ **Tornato all'esercizio precedente**: {ex_prev['name']} — serie {user.set_idx + 1}/{total_sets_prev}")
+        await _prompt_next_set(cb.message, user, db)
+        await cb.answer()
+        return
+
     ex = exercises[user.exercise_idx]
     total_sets = int(ex["sets"])
     
@@ -150,6 +163,7 @@ async def skip_set_callback(cb: types.CallbackQuery):
     await cb.message.answer(f"⏭️ **Set saltato**: {ex['name']} — serie {user.set_idx}/{total_sets}")
     await _prompt_next_set(cb.message, user, db)
     await cb.answer()
+
 
 async def _display_plan(message: types.Message, tg_user: types.User):
     db = get_db()
@@ -291,15 +305,6 @@ async def _prompt_next_set(message: types.Message, user: User, db):
         db.commit()
         return await _prompt_next_set(message, user, db)
 
-    # Recupera l'ultimo log per questo esercizio
-    last_log = db.query(WorkoutLog).filter(
-        WorkoutLog.user_id == user.id,
-        WorkoutLog.exercise == ex['name']
-    ).order_by(WorkoutLog.ts.desc()).first()
-
-    last_weight_info = ""
-    if last_log:
-        last_weight_info = f"\n📊 Ultimo: {last_log.weight}kg × {last_log.reps}"
 
     # Se è l'inizio di un nuovo esercizio (prima serie), mostra il recap dei progressi
     progress_recap = ""
@@ -335,8 +340,8 @@ async def _prompt_next_set(message: types.Message, user: User, db):
     
     # Crea la tastiera con pulsanti Indietro e Salta
     kb = InlineKeyboardBuilder()
-    # Mostra "Indietro" solo se ci sono set precedenti per questo esercizio
-    if user.set_idx > 0:
+    # Mostra "Indietro" se ci sono set precedenti o se non siamo al primo esercizio
+    if user.set_idx > 0 or (user.set_idx == 0 and user.exercise_idx > 0):
         kb.button(text="⬅️ Indietro", callback_data="back:set")
     kb.button(text="⏭️ Salta", callback_data="skip:set")
     kb.adjust(1)
@@ -345,7 +350,6 @@ async def _prompt_next_set(message: types.Message, user: User, db):
         f"🏋️ <b>{ex['name']}</b>\n"
         f"Serie <b>{user.set_idx + 1}</b> / {total_sets}\n"
         f"Target reps: <b>{ex['reps']}</b> • Recupero: <b>{ex['rest']}</b>"
-        f"{last_weight_info}"
         f"{progress_recap}\n\n"
         f"Inserisci: <code>peso reps</code> (es. <code>50 10</code>)",
         reply_markup=kb.as_markup()
