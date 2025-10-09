@@ -3,3 +3,5 @@ SQLAlchemy>=2.0
 pandas
 openpyxl
 python-dotenv
+psycopg2-binary
+alembic
