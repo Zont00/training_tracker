@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from aiogram import Router, F, types
 from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.db import get_db
 from app.models import User, WorkoutLog
 from app.utils.plan_parser import parse_plan_from_df
@@ -49,10 +50,23 @@ async def handle_excel(message: types.Message):
         user.set_idx = 0
         db.commit()
 
+        # Crea tastiera con pulsanti azione rapida
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🏋️ Inizia Allenamento", callback_data="workout:start")
+        kb.button(text="📋 Vedi Piano", callback_data="view_plan")
+        kb.button(text="📈 Vedi Progressi", callback_data="view_progress")
+        kb.adjust(2, 1)
+
+        total_exercises = sum(len(exercises) for exercises in plan.values())
+        
         await message.answer(
-            "✅ Scheda importata con successo!\n"
-            f"Allenamenti trovati: <b>{', '.join(plan.keys())}</b>\n"
-            "Usa /workout per iniziare o /progress per vedere i progressi."
+            "🎉 <b>Scheda importata con successo!</b>\n\n"
+            f"📊 <b>Dettagli importazione:</b>\n"
+            f"• Allenamenti trovati: <b>{len(plan)}</b>\n"
+            f"• Esercizi totali: <b>{total_exercises}</b>\n"
+            f"• Giorni: <b>{', '.join(plan.keys())}</b>\n\n"
+            f"💡 <i>Ora puoi iniziare subito il tuo allenamento!</i>",
+            reply_markup=kb.as_markup()
         )
     except Exception as e:
         await message.answer(f"❌ Errore nell'importazione: <code>{e}</code>")
