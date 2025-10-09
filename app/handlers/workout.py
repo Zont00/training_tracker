@@ -158,10 +158,101 @@ async def skip_set_callback(cb: types.CallbackQuery):
     # Passa alla serie successiva senza registrare nulla
     user.set_idx += 1
     db.commit()
-    db.close()
 
-    await cb.message.answer(f"⏭️ **Set saltato**: {ex['name']} — serie {user.set_idx}/{total_sets}")
-    await _prompt_next_set(cb.message, user, db)
+    # Se abbiamo superato l'ultima serie, passiamo all'esercizio successivo
+    if user.set_idx >= total_sets:
+        user.exercise_idx += 1
+        user.set_idx = 0
+        db.commit()
+        db.close()
+        await cb.answer()
+        await _prompt_next_set(cb.message, user, db)
+    else:
+        db.close()
+        await cb.message.answer(f"⏭️ **Set saltato**: {ex['name']} — serie {user.set_idx}/{total_sets}")
+        await _prompt_next_set(cb.message, user, db)
+        await cb.answer()
+
+@router.callback_query(F.data == "view_plan_current")
+async def view_plan_current_callback(cb: types.CallbackQuery):
+    db = get_db()
+    user = _get_user(db, cb.from_user)
+    
+    if not user.training_plan or not user.current_day:
+        db.close()
+        await cb.answer("⚠️ Nessun workout attivo.")
+        return
+
+    plan = json.loads(user.training_plan)
+    current_day = user.current_day
+    
+    if current_day not in plan:
+        db.close()
+        await cb.answer("⚠️ Giorno di allenamento non trovato.")
+        return
+
+    exercises = plan[current_day]
+    response = f"📋 **Piano di Allenamento - {current_day}**\n\n"
+    
+    for i, ex in enumerate(exercises, 1):
+        current_indicator = "🟢 " if i-1 == user.exercise_idx else "   "
+        response += f"{current_indicator}{i}. {ex['name']} - {ex['sets']}x{ex['reps']} - Recupero: {ex['rest']}\n"
+    
+    response += f"\n📍 <i>Attualmente all'esercizio {user.exercise_idx + 1}</i>"
+    
+    await cb.message.answer(response)
+    db.close()
+    await cb.answer()
+
+@router.callback_query(F.data == "cancel_workout")
+async def cancel_workout_callback(cb: types.CallbackQuery):
+    db = get_db()
+    user = _get_user(db, cb.from_user)
+    
+    if not user.training_plan or not user.current_day:
+        db.close()
+        await cb.answer("⚠️ Nessun workout attivo.")
+        return
+
+    # Crea tastiera di conferma
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Conferma Annullamento", callback_data="cancel_workout_confirm")
+    kb.button(text="❌ Continua Allenamento", callback_data="cancel_workout_cancel")
+    kb.adjust(1)
+    
+    await cb.message.answer(
+        "⚠️ **Conferma Annullamento**\n\n"
+        "Sei sicuro di voler annullare l'allenamento in corso?\n"
+        "Tutti i progressi non salvati andranno persi.",
+        reply_markup=kb.as_markup()
+    )
+    db.close()
+    await cb.answer()
+
+@router.callback_query(F.data == "cancel_workout_confirm")
+async def cancel_workout_confirm_callback(cb: types.CallbackQuery):
+    db = get_db()
+    user = _get_user(db, cb.from_user)
+    
+    current_day = user.current_day
+    user.current_day = None
+    user.exercise_idx = 0
+    user.set_idx = 0
+    awaiting_set[user.id] = False
+    db.commit()
+    db.close()
+    
+    await cb.message.answer(f"❌ Allenamento <b>{current_day}</b> annullato.")
+    await cb.answer()
+
+@router.callback_query(F.data == "cancel_workout_cancel")
+async def cancel_workout_cancel_callback(cb: types.CallbackQuery):
+    await cb.message.answer("✅ Allenamento ripreso.")
+    await cb.answer()
+
+@router.callback_query(F.data == "workout_cancel")
+async def workout_cancel_callback(cb: types.CallbackQuery):
+    await cb.message.answer("❌ Allenamento annullato.")
     await cb.answer()
 
 
@@ -255,18 +346,26 @@ async def _start_workout_flow(message: types.Message, tg_user: types.User):
 
     if not user.training_plan:
         db.close()
-        return await message.answer("⚠️ Nessuna scheda caricata. Usa /import_plan.")
+        return await message.answer("⚠️ <b>Nessuna scheda caricata</b>\n\nUsa il comando /import_plan per caricare la tua scheda di allenamento.")
 
     plan = json.loads(user.training_plan)
     if not plan:
         db.close()
-        return await message.answer("⚠️ La scheda è vuota. Reimporta il file.")
+        return await message.answer("⚠️ <b>La scheda è vuota</b>\n\nReimporta il file con /import_plan.")
 
     kb = InlineKeyboardBuilder()
     for day in plan.keys():
-        kb.button(text=day, callback_data=f"day:{day}")
-    kb.adjust(2)
-    await message.answer("Scegli l'allenamento di oggi:", reply_markup=kb.as_markup())
+        kb.button(text=f"🏷️ {day}", callback_data=f"day:{day}")
+    kb.button(text="❌ Annulla", callback_data="workout_cancel")
+    kb.adjust(1)
+    
+    response = (
+        "🏋️‍♂️ <b>Inizia il tuo allenamento!</b>\n\n"
+        "Scegli il giorno di allenamento che vuoi fare oggi:\n\n"
+        "💡 <i>Puoi visualizzare il piano completo con /view_plan</i>"
+    )
+    
+    await message.answer(response, reply_markup=kb.as_markup())
     db.close()
 
 @router.callback_query(F.data.startswith("day:"))
@@ -338,22 +437,37 @@ async def _prompt_next_set(message: types.Message, user: User, db):
 
     awaiting_set[user.id] = True
     
-    # Crea la tastiera con pulsanti Indietro e Salta
+    # Crea la tastiera con pulsanti Indietro, Salta, Piano e Annulla
     kb = InlineKeyboardBuilder()
+    
     # Mostra "Indietro" se ci sono set precedenti o se non siamo al primo esercizio
     if user.set_idx > 0 or (user.set_idx == 0 and user.exercise_idx > 0):
-        kb.button(text="⬅️ Indietro", callback_data="back:set")
-    kb.button(text="⏭️ Salta", callback_data="skip:set")
-    kb.adjust(1)
+        kb.button(text="↩️ Indietro", callback_data="back:set")
     
-    await message.answer(
-        f"🏋️ <b>{ex['name']}</b>\n"
-        f"Serie <b>{user.set_idx + 1}</b> / {total_sets}\n"
-        f"Target reps: <b>{ex['reps']}</b> • Recupero: <b>{ex['rest']}</b>"
-        f"{progress_recap}\n\n"
-        f"Inserisci: <code>peso reps</code> (es. <code>50 10</code>)",
-        reply_markup=kb.as_markup()
+    kb.button(text="⏭️ Salta Serie", callback_data="skip:set")
+    kb.button(text="📋 Vedi Piano", callback_data="view_plan_current")
+    kb.button(text="❌ Annulla Allenamento", callback_data="cancel_workout")
+    kb.adjust(2)
+    
+    # Messaggio più descrittivo e user-friendly
+    message_text = (
+        f"💪 <b>{ex['name']}</b>\n\n"
+        f"📊 <b>Progresso:</b> Serie {user.set_idx + 1} di {total_sets}\n"
+        f"🎯 <b>Obiettivo:</b> {ex['reps']} ripetizioni\n"
+        f"⏱️ <b>Recupero:</b> {ex['rest']}\n"
     )
+    
+    if progress_recap:
+        message_text += progress_recap
+    
+    message_text += (
+        f"\n📝 <b>Inserisci i dati della serie:</b>\n"
+        f"• Formato: <code>peso reps</code>\n"
+        f"• Esempio: <code>50 10</code>\n\n"
+        f"💡 <i>Puoi usare la virgola per i decimali (es. 52,5)</i>"
+    )
+    
+    await message.answer(message_text, reply_markup=kb.as_markup())
 
 @router.message()
 async def capture_set(message: types.Message):
