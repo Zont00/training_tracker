@@ -1,4 +1,6 @@
 import json
+import asyncio
+import re
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -8,6 +10,7 @@ from app.keyboards import reset_confirmation_menu
 
 router = Router()
 awaiting_set: dict[int, bool] = {}
+active_timers: dict[int, asyncio.Task] = {}
 
 def _get_user(db, tg_user: types.User) -> User:
     user = db.query(User).filter(User.id == tg_user.id).first()
@@ -514,5 +517,137 @@ async def capture_set(message: types.Message):
     awaiting_set[message.from_user.id] = False
 
     await message.answer(f"✅ Registrato: <b>{ex['name']}</b> — set {set_number}/{total_sets}: <b>{weight}kg × {reps}</b>")
+    
+    # Start smart rest timer only if we're not at the last set of the exercise
+    if user.set_idx < total_sets:
+        await _start_rest_timer(message, user, ex)
+    else:
+        await message.answer("🏁 **Esercizio completato!** Passando al prossimo...")
+    
     await _prompt_next_set(message, user, db)
     db.close()
+
+async def _start_rest_timer(message: types.Message, user: User, ex: dict):
+    """Start a smart rest timer after a set is completed"""
+    # Get rest time directly from the exercise data in the training plan
+    rest_time_str = ex.get('rest', '60s')  # Default to 60 seconds if not specified
+    
+    # Parse rest time string to seconds
+    total_seconds = _parse_rest_time(rest_time_str)
+    
+    if total_seconds <= 0:
+        return  # No rest time specified or invalid
+    
+    user_id = user.id
+    
+    # Cancel any existing timer for this user
+    if user_id in active_timers:
+        active_timers[user_id].cancel()
+        del active_timers[user_id]
+    
+    # Create and store the timer task
+    timer_task = asyncio.create_task(_run_rest_timer(message, user_id, total_seconds, ex['name'], rest_time_str))
+    active_timers[user_id] = timer_task
+
+def _parse_rest_time(rest_str: str) -> int:
+    """Parse rest time string (e.g., '60s', '1m', '1m 30s', '120''') to total seconds"""
+    if not rest_str:
+        return 60  # Default to 60 seconds
+    
+    rest_str = rest_str.lower().strip()
+    total_seconds = 0
+    
+    # Match minutes and seconds
+    minute_match = re.search(r'(\d+)\s*m', rest_str)
+    second_match = re.search(r'(\d+)\s*(?:s|'')', rest_str)  # Handle both 's' and '' notation
+    
+    if minute_match:
+        total_seconds += int(minute_match.group(1)) * 60
+    
+    if second_match:
+        total_seconds += int(second_match.group(1))
+    
+    # If no matches found, try to parse as plain number (assume seconds)
+    if total_seconds == 0 and rest_str.replace('"', '').replace("'", '').isdigit():
+        total_seconds = int(rest_str.replace('"', '').replace("'", ''))
+    
+    return total_seconds if total_seconds > 0 else 60  # Default to 60 seconds if invalid
+
+async def _run_rest_timer(message: types.Message, user_id: int, total_seconds: int, exercise_name: str, rest_time_str: str):
+    """Run the actual rest timer countdown"""
+    try:
+        # Send initial timer start message
+        timer_msg = await message.answer(
+            f"⏱️ <b>Timer di Recupero Avviato</b>\n\n"
+            f"💪 <b>{exercise_name}</b>\n"
+            f"⏰ <b>Recupero impostato:</b> {rest_time_str}\n"
+            f"🕒 <b>Tempo rimanente:</b> {total_seconds}s\n\n"
+            f"💡 <i>Il timer si aggiornerà automaticamente</i>"
+        )
+        
+        remaining = total_seconds
+        
+        # Update every second until time is up
+        while remaining > 0:
+            await asyncio.sleep(1)
+            remaining -= 1
+            
+            # Check if user has moved on (no longer awaiting set)
+            if not awaiting_set.get(user_id, False):
+                break
+            
+            # Update the message with remaining time
+            if remaining > 0:
+                # Format time for better display
+                if remaining >= 60:
+                    minutes = remaining // 60
+                    seconds = remaining % 60
+                    time_str = f"{minutes}m {seconds}s"
+                else:
+                    time_str = f"{remaining}s"
+                
+                # Add beep sound indicator for last 3 seconds
+                beep_indicator = ""
+                if remaining <= 3:
+                    beep_indicator = f"\n🔊 <b>BEEP!</b>"
+                
+                try:
+                    await timer_msg.edit_text(
+                        f"⏱️ <b>Timer di Recupero</b>\n\n"
+                        f"💪 <b>{exercise_name}</b>\n"
+                        f"⏰ <b>Recupero impostato:</b> {rest_time_str}\n"
+                        f"🕒 <b>Tempo rimanente:</b> {time_str}{beep_indicator}\n\n"
+                        f"💡 <i>Il timer si aggiornerà automaticamente</i>"
+                    )
+                except Exception:
+                    # Message might be too old to edit, break out
+                    break
+        
+        # Timer completed or stopped
+        if remaining <= 0:
+            await timer_msg.edit_text(
+                f"🔔 <b>Timer di Recupero Completato!</b>\n\n"
+                f"💪 <b>{exercise_name}</b>\n"
+                f"⏰ <b>Recupero impostato:</b> {rest_time_str}\n"
+                f"✅ <b>Pronto per la prossima serie!</b>\n\n"
+                f"🔄 Il tempo di recupero è terminato."
+            )
+        else:
+            # Timer was stopped (user moved on)
+            await timer_msg.edit_text(
+                f"⏹️ <b>Timer di Recupero Interrotto</b>\n\n"
+                f"💪 <b>{exercise_name}</b>\n"
+                f"⏰ <b>Recupero impostato:</b> {rest_time_str}\n"
+                f"🔜 <b>Passando alla serie successiva...</b>"
+            )
+    
+    except asyncio.CancelledError:
+        # Timer was cancelled externally
+        pass
+    except Exception as e:
+        # Log any other errors but don't crash
+        print(f"Timer error: {e}")
+    finally:
+        # Clean up
+        if user_id in active_timers:
+            del active_timers[user_id]
