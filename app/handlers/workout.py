@@ -148,6 +148,12 @@ async def skip_set_callback(cb: types.CallbackQuery):
         await cb.answer("⚠️ Nessun workout attivo.")
         return
 
+    # Stop any active timer for this user
+    user_id = user.id
+    if user_id in active_timers:
+        active_timers[user_id].cancel()
+        del active_timers[user_id]
+
     plan = json.loads(user.training_plan)
     exercises = plan.get(user.current_day, [])
     if user.exercise_idx >= len(exercises):
@@ -238,6 +244,14 @@ async def cancel_workout_confirm_callback(cb: types.CallbackQuery):
     user = _get_user(db, cb.from_user)
     
     current_day = user.current_day
+    
+    # Delete all workout logs for the current day and user
+    if current_day:
+        db.query(WorkoutLog).filter(
+            WorkoutLog.user_id == user.id,
+            WorkoutLog.day == current_day
+        ).delete()
+    
     user.current_day = None
     user.exercise_idx = 0
     user.set_idx = 0
@@ -245,7 +259,7 @@ async def cancel_workout_confirm_callback(cb: types.CallbackQuery):
     db.commit()
     db.close()
     
-    await cb.message.answer(f"❌ Allenamento <b>{current_day}</b> annullato.")
+    await cb.message.answer(f"❌ Allenamento <b>{current_day}</b> annullato. Tutti i progressi di questa sessione sono stati eliminati.")
     await cb.answer()
 
 @router.callback_query(F.data == "cancel_workout_cancel")
