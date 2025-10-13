@@ -14,7 +14,7 @@ def parse_plan_from_df(df: pd.DataFrame) -> dict:
     cols = set(df.columns.astype(str))
     if not REQUIRED.issubset(cols):
         missing = ", ".join(REQUIRED - cols)
-        raise ValueError(f"Mancano colonne richieste: {missing}")
+        raise ValueError(f"Mancane colonne richieste: {missing}")
 
     df["Allenamento"] = df["Allenamento"].astype(str).str.strip()
     df["Esercizio"] = df["Esercizio"].astype(str).str.strip()

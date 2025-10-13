@@ -273,6 +273,7 @@ async def workout_cancel_callback(cb: types.CallbackQuery):
     await cb.answer()
 
 
+
 async def _display_plan(message: types.Message, tg_user: types.User):
     db = get_db()
     user = _get_user(db, tg_user)
@@ -574,8 +575,18 @@ async def _prompt_next_set(message: types.Message, user: User, db):
     
     kb.button(text="⏭️ Salta Serie", callback_data="skip:set")
     kb.button(text="📋 Vedi Piano", callback_data="view_plan_current")
+    
+    # Aggiungi pulsante "Guarda Video" solo alla prima serie di ogni esercizio
+    if user.set_idx == 0:
+        # Generate YouTube search URL based on exercise name
+        search_query = f"{ex['name']} esercizio come fare tutorial"
+        youtube_search_url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
+        kb.button(text="🎥 Guarda Video", url=youtube_search_url)
+    
     kb.button(text="❌ Annulla Allenamento", callback_data="cancel_workout")
-    kb.adjust(2)
+    
+    # Layout semplificato per garantire che tutti i pulsanti siano visibili
+    kb.adjust(2, 1)  # 2 colonne per i primi pulsanti, poi 1 colonna per gli altri
     
     # Messaggio più descrittivo e user-friendly
     message_text = (
