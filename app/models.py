@@ -14,6 +14,7 @@ class User(Base):
     last_updated = Column(DateTime, default=datetime.utcnow)
 
     logs = relationship("WorkoutLog", back_populates="user", cascade="all, delete-orphan")
+    training_plans = relationship("TrainingPlan", back_populates="user", cascade="all, delete-orphan")
 
 class WorkoutLog(Base):
     __tablename__ = "workout_logs"
@@ -27,3 +28,14 @@ class WorkoutLog(Base):
     ts = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="logs")
+
+class TrainingPlan(Base):
+    __tablename__ = "training_plans"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    plan_name = Column(String, nullable=False)
+    plan_data = Column(Text)  # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Integer, default=1)  # 1 = active, 0 = inactive
+
+    user = relationship("User", back_populates="training_plans")

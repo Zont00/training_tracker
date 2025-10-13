@@ -5,7 +5,7 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.db import get_db
-from app.models import User, WorkoutLog
+from app.models import User, WorkoutLog, TrainingPlan
 from app.utils.plan_parser import parse_plan_from_df
 
 router = Router()
@@ -138,6 +138,22 @@ async def handle_excel(message: types.Message):
         df = pd.read_excel(buf)
         plan = parse_plan_from_df(df)
 
+        # Generate plan name from filename or use default
+        plan_name = message.document.file_name.replace('.xlsx', '').replace('_', ' ').title()
+        if not plan_name or plan_name.isspace():
+            plan_name = f"Scheda {datetime.now().strftime('%d/%m/%Y')}"
+
+        # Create new training plan record
+        new_plan = TrainingPlan(
+            user_id=user.id,
+            plan_name=plan_name,
+            plan_data=json.dumps(plan, ensure_ascii=False),
+            created_at=datetime.now(),
+            is_active=1
+        )
+        db.add(new_plan)
+
+        # Also update user's current training plan for backward compatibility
         user.training_plan = json.dumps(plan, ensure_ascii=False)
         user.current_day = None
         user.exercise_idx = 0
@@ -156,6 +172,7 @@ async def handle_excel(message: types.Message):
         await message.answer(
             "🎉 <b>Scheda importata con successo!</b>\n\n"
             f"📊 <b>Dettagli importazione:</b>\n"
+            f"• Nome scheda: <b>{plan_name}</b>\n"
             f"• Allenamenti trovati: <b>{len(plan)}</b>\n"
             f"• Esercizi totali: <b>{total_exercises}</b>\n"
             f"• Giorni: <b>{', '.join(plan.keys())}</b>\n\n"

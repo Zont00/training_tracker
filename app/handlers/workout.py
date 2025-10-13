@@ -5,7 +5,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.db import get_db
-from app.models import User, WorkoutLog
+from app.models import User, WorkoutLog, TrainingPlan
 from app.keyboards import reset_confirmation_menu
 
 router = Router()
@@ -41,11 +41,11 @@ async def view_plan_callback(cb: types.CallbackQuery):
 
 @router.message(Command("progress"))
 async def progress_cmd(message: types.Message):
-    await _display_progress(message, message.from_user)
+    await _select_plan_for_progress(message, message.from_user)
 
 @router.callback_query(F.data == "view_progress")
 async def progress_callback(cb: types.CallbackQuery):
-    await _display_progress(cb.message, cb.from_user)
+    await _select_plan_for_progress(cb.message, cb.from_user)
     await cb.answer()
 
 @router.callback_query(F.data == "reset:confirm")
@@ -297,7 +297,118 @@ async def _display_plan(message: types.Message, tg_user: types.User):
     await message.answer(response)
     db.close()
 
+async def _select_plan_for_progress(message: types.Message, tg_user: types.User):
+    """Let user select which training plan to view progress for"""
+    db = get_db()
+    user = _get_user(db, tg_user)
+
+    # Get all training plans for this user
+    training_plans = db.query(TrainingPlan).filter(
+        TrainingPlan.user_id == user.id,
+        TrainingPlan.is_active == 1
+    ).order_by(TrainingPlan.created_at.desc()).all()
+
+    if not training_plans:
+        db.close()
+        return await message.answer("📈 **I tuoi progressi**\n\nNessuna scheda caricata. Usa /import_plan.")
+
+    # Create keyboard with available plans
+    kb = InlineKeyboardBuilder()
+    for plan in training_plans:
+        kb.button(text=f"📋 {plan.plan_name}", callback_data=f"progress_plan:{plan.id}")
+    kb.button(text="❌ Annulla", callback_data="progress_cancel")
+    kb.adjust(1)
+
+    await message.answer(
+        "📈 **Seleziona la scheda per visualizzare i progressi**\n\n"
+        "Scegli quale scheda di allenamento vuoi visualizzare:",
+        reply_markup=kb.as_markup()
+    )
+    db.close()
+
+@router.callback_query(F.data.startswith("progress_plan:"))
+async def select_progress_plan(cb: types.CallbackQuery):
+    plan_id = int(cb.data.split(":", 1)[1])
+    db = get_db()
+    
+    # Get the selected training plan
+    training_plan = db.query(TrainingPlan).filter(
+        TrainingPlan.id == plan_id
+    ).first()
+
+    if not training_plan:
+        db.close()
+        await cb.answer("⚠️ Piano non trovato.")
+        return
+
+    await _display_progress_for_plan(cb.message, cb.from_user, training_plan)
+    db.close()
+    await cb.answer()
+
+@router.callback_query(F.data == "progress_cancel")
+async def progress_cancel_callback(cb: types.CallbackQuery):
+    await cb.message.answer("❌ Visualizzazione progressi annullata.")
+    await cb.answer()
+
+async def _display_progress_for_plan(message: types.Message, tg_user: types.User, training_plan: TrainingPlan):
+    """Display progress for a specific training plan"""
+    db = get_db()
+    user = _get_user(db, tg_user)
+
+    plan = json.loads(training_plan.plan_data)
+    
+    # Recupera tutti i log dell'utente
+    logs = db.query(WorkoutLog).filter(
+        WorkoutLog.user_id == user.id
+    ).order_by(WorkoutLog.ts.asc()).all()
+    
+    if not logs:
+        db.close()
+        return await message.answer(f"📈 **Progressi - {training_plan.plan_name}**\n\nNessun dato di allenamento registrato per questa scheda.")
+
+    # Raggruppa i log per giorno di allenamento e poi per esercizio
+    workout_progress = {}
+    for log in logs:
+        if log.day not in workout_progress:
+            workout_progress[log.day] = {}
+        if log.exercise not in workout_progress[log.day]:
+            workout_progress[log.day][log.exercise] = {}
+        
+        date_str = log.ts.strftime("%d/%m")
+        if date_str not in workout_progress[log.day][log.exercise]:
+            workout_progress[log.day][log.exercise][date_str] = []
+        workout_progress[log.day][log.exercise][date_str].append(log)
+
+    response = f"📈 **Progressi - {training_plan.plan_name}**\n\n"
+    
+    # Per ogni giorno nel piano (nell'ordine della scheda)
+    for day_name in plan.keys():
+        if day_name in workout_progress and workout_progress[day_name]:
+            response += f"🏷️ **{day_name}**\n"
+            
+            # Per ogni esercizio nel giorno (nell'ordine della scheda)
+            for exercise in plan[day_name]:
+                exercise_name = exercise['name']
+                if exercise_name in workout_progress[day_name]:
+                    response += f"  🏋️ {exercise_name}:\n"
+                    
+                    # Per ogni data in cui è stato fatto l'esercizio (ordinate cronologicamente)
+                    for date_str in sorted(workout_progress[day_name][exercise_name].keys()):
+                        logs_list = workout_progress[day_name][exercise_name][date_str]
+                        response += f"    📅 {date_str}: "
+                        # Mostra tutti i set del giorno in formato compatto
+                        sets = [f"{log.weight}kg × {log.reps}" for log in logs_list]
+                        response += " ".join(sets) + "\n"
+                    
+                    response += "\n"
+            
+            response += "\n"
+    
+    await message.answer(response)
+    db.close()
+
 async def _display_progress(message: types.Message, tg_user: types.User):
+    """Legacy function for backward compatibility"""
     db = get_db()
     user = _get_user(db, tg_user)
 
